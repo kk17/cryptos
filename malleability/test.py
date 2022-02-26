@@ -1,13 +1,18 @@
 from cryptos.bitcoin import BITCOIN
-from cryptos.transaction import Tx, TxIn, TxOut, Script
+from cryptos.transaction import Tx, TxIn, TxOut, Script, TxFetcher
 from cryptos.keys import PublicKey
-from cryptos.ecdsa import sign
+from cryptos.ecdsa import sign, Signature
 from cryptos.sha256 import sha256
 from dataclasses import dataclass
 from typing import List
 import random
 import logging
 import requests
+import string
+import time
+import logging
+from io import BytesIO
+from pprint import pprint
 
 @dataclass
 class UTXO:
@@ -52,10 +57,33 @@ class TxBroadcaster:
         else:
             raise ValueError("%s is not a valid net type, should be main|test" % (net, ))
         response = requests.post(url, tx.encode().hex())
-        assert response.status_code == 200, "send transaction %s failed, response: %s" % (tx.id(), response)
         resp_text = response.text.strip()
+        assert response.status_code == 200, "send transaction %s failed, response: %s" % (tx.id(), resp_text)
         return resp_text
 
+
+class TxStatusFetcher:
+    """ lazily fetches transactions using an api on demand """
+
+    @staticmethod
+    def fetch(tx_id: str, net: str):
+        assert isinstance(tx_id, str)
+        assert all(c in string.hexdigits for c in tx_id)
+        tx_id = tx_id.lower() # normalize just in case we get caps
+
+        # fetch bytes from api
+        # print("fetching transaction %s from API" % (tx_id, ))
+        assert net is not None, "can't fetch a transaction without knowing which net to look at, e.g. main|test"
+        if net == 'main':
+            url = 'https://blockstream.info/api/tx/%s/status' % (tx_id, )
+        elif net == 'test':
+            url = 'https://blockstream.info/testnet/api/tx/%s/status' % (tx_id, )
+        else:
+            raise ValueError("%s is not a valid net type, should be main|test" % (net, ))
+        response = requests.get(url)
+        assert response.status_code == 200, "transaction id %s was not found on blockstream" % (tx_id, )
+        status = response.json()
+        return status
 
 class MalleabilityTest:
     def __init__(self, 
@@ -120,41 +148,148 @@ class MalleabilityTest:
             tx_ins[i].script_sig = script_sig
         return tx
 
-    def modify_transation(self):
-        pass
+    def modify_transation(self, tx_data: bytes, trick):
+        tx = Tx.decode(BytesIO(tx_data))
+        tx_in = tx.tx_ins[0]
+        origin_cmds = tx_in.script_sig.cmds
+        origin_sig = origin_cmds[0]
+
+        # Decode the signature for modification
+        # According to https://en.bitcoin.it/wiki/BIP_0062#DER_encoding DER has the following format:
+        # 0x30 [total-length] 0x02 [R-length] [R] 0x02 [S-length] [S] [sighash-type]
+        sig = Signature.decode(origin_sig[:-1])
+
+        def dern(n:int):
+            nb = n.to_bytes(34, byteorder='big')
+            nb = nb.lstrip(b'\x00') # strip leading zeros
+            nb = (b'\x00' if nb[0] >= 0x80 else b'') + nb # preprend 0x00 if first byte >= 0x80
+            return nb
+
+        if trick == "der-padding":
+            # Trick 1: padding 0x00 byte to the part of the DER signature bytes
+            # However is not working now, when we submit the transaction to blockstream we get error:
+            # {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical DER signature)"}
+            rb = dern(sig.r)
+            sb = dern(sig.s)
+            new_rb = b'\x00' + rb
+            content = b''.join([bytes([0x02, len(new_rb)]), new_rb, bytes([0x02, len(sb)]), sb])
+            new_sig = b''.join([bytes([0x30, len(content)]), content]) + b'\x01' # DER signature + SIGHASH_ALL
+        else:
+            # Trick 2: using the complementary signature
+            # However is not working now, when we submit the transaction to blockstream we get error:
+            # {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical signature: S value is unnecessarily high)
+            rb = dern(sig.r)
+            new_s = BITCOIN.gen.n -sig.s
+            sb = dern(new_s)
+            content = b''.join([bytes([0x02, len(rb)]), rb, bytes([0x02, len(sb)]), sb])
+            new_sig = b''.join([bytes([0x30, len(content)]), content]) + b'\x01' # DER signature + SIGHASH_ALL
+
+        assert origin_sig != new_sig
+        logging.debug(f"origin_sig: {origin_sig}")
+        logging.debug(f"new_sig: {new_sig}")
+        new_cmds = [new_sig, origin_cmds[1]]
+        tx_in.script_sig = Script(new_cmds)
+        return tx
 
     def broadcast_transation(self, tx:Tx):
         return TxBroadcaster.broadcast(tx, net=self.net)
 
-    def get_transation_status(self):
-        pass
+    def fetch_transation(self, tx_id:str, retry_interval_seconds=1, max_tries=10):
+        ex = None
+        n = 0
+        while n < max_tries:
+            n += 1
+            try:
+                status = TxStatusFetcher.fetch(tx_id, self.net)
+            except Exception as e:
+                ex = e
+                logging.info(f"get transaction {tx_id} status error: {e}, tried times: {n}")
+            if status["confirmed"]:
+                return TxFetcher.fetch(tx_id, self.net)
+            time.sleep(retry_interval_seconds)
+        raise ex
 
+
+def print_tranction_info(tx:Tx):
+    print(tx)
+    print(f"      tx id: {tx.id()}")
+    print(f"    tx link: https://www.blockchain.com/btc-testnet/tx/{tx.id()}")
+    print(f"  tx encode: {tx.encode().hex()}")
+    print(f"tx validate: {tx.validate()}")
 
 
 def main():
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
 
-    sender_wallet = Wallet.gen_from_bytes(b"Kyle is cool :P")
-    receiver_wallet = Wallet.gen_from_bytes(b"Kyle's Super Secret 2nd Wallet")
+    # sender_wallet = Wallet.gen_from_bytes(b"Kyle is cool :P")
+    # receiver_wallet = Wallet.gen_from_bytes(b"Kyle's Super Secret 2nd Wallet")
 
-    # receiver_wallet = Wallet.gen_from_bytes(b"Kyle is cool :P")
-    # sender_wallet = Wallet.gen_from_bytes(b"Kyle's Super Secret 2nd Wallet")
+    receiver_wallet = Wallet.gen_from_bytes(b"Kyle is cool :P")
+    sender_wallet = Wallet.gen_from_bytes(b"Kyle's Super Secret 2nd Wallet")
     logging.info(f"sender_wallet: {sender_wallet.get_address(as_link=True)}")
     logging.info(f"receiver_wallet: {receiver_wallet.get_address(as_link=True)}")
 
     utxos = [
-        UTXO("87a42a746a45fe1729f60e8c2ea3a82721ca4ffd86cc1e3e2e106fddb50fcd76")
+        UTXO("18f84576214e0ab89ea6a746afa0aafc65c87783dc2071ac75af9a538172b77f")
     ]
     
     test = MalleabilityTest(sender_wallet, receiver_wallet, utxos)
-    tx = test.make_transaction()
-    logging.info(f"tx: {tx}")
-    logging.info(f"tx id: {tx.id()}")
-    logging.info(f"tx encode: {tx.encode().hex()}")
 
-    if tx.validate:
-        resp = test.broadcast_transation(tx)
-        logging.info(f"send transaction response: {resp}")
+    print("-" * 80)
+    tx = test.make_transaction()
+    assert tx.validate()
+    print("Original transaction info:")
+    print_tranction_info(tx)
+
+
+    print("-" * 80)
+    # Suppose the tx bytes data is send to a malicious node.
+    # Remember we can't steal money or make any semantic changes to the transaction.
+    # The node will modify the part of the signature of transation and the new transction
+    # is valid but the transaction id is changed
+    mod_tx1 = test.modify_transation(tx.encode(), trick="der-padding")
+    assert mod_tx1.validate()
+    assert mod_tx1.id() != tx.id()
+    print("Modify transaction1 info:")
+    print_tranction_info(mod_tx1)
+
+    print("-" * 80)
+    print(f"Original transaction id: {tx.id()}")
+    print(f"  Modify transaction1 id: {mod_tx1.id()}")
+    print("-" * 80)
+
+    # The malicious node will broadcast the modified transation to the network. Because is valid,
+    # it will be confirmed and be part of one of the block in the blockchain.
+    # The flaw related to DER-encoded ASN.1 data was fixed by the BIP66 soft fork.
+    # Here we will get error: {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical DER signature)"}
+
+    try:
+        test.broadcast_transation(mod_tx1)
+    except Exception as e:
+        print(e)
+
+
+    mod_tx2 = test.modify_transation(tx.encode(), trick="ecdsa-siging")
+    assert mod_tx2.validate()
+    assert mod_tx2.id() != tx.id()
+    print("Modify transaction2 info:")
+    print_tranction_info(mod_tx2)
+
+    # Bitcoin Core added a mechanism to enforce low S-values with PR #6769, which was merged in Bitcoin Core in October 2015. 
+    # Here we will get error: {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical DER signature)"}
+    try:
+        test.broadcast_transation(mod_tx2)
+    except Exception as e:
+        print(e)
+
+    # We will try to get the transaction from the network to verify it is confirmed
+    # test.fetch_transation(mod_tx.id())
+
+    # We also try to broadcast the original transaction to the network. But because the
+    # modified transation was confirm, we cannot double spend the money. Thus it will no be 
+    # confirmed.
+    # test.broadcast_transation(tx)
+    # test.fetch_transation(tx.id())
 
 if __name__ == '__main__':
     main()
