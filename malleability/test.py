@@ -167,7 +167,7 @@ class MalleabilityTest:
 
         if trick == "der-padding":
             # Trick 1: padding 0x00 byte to the part of the DER signature bytes
-            # However is not working now, when we submit the transaction to blockstream we get error:
+            # However this trick is not working now, when we submit the transaction to blockstream we get error:
             # {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical DER signature)"}
             rb = dern(sig.r)
             sb = dern(sig.s)
@@ -175,11 +175,11 @@ class MalleabilityTest:
             content = b''.join([bytes([0x02, len(new_rb)]), new_rb, bytes([0x02, len(sb)]), sb])
             new_sig = b''.join([bytes([0x30, len(content)]), content]) + b'\x01' # DER signature + SIGHASH_ALL
         else:
-            # Trick 2: using the complementary signature
-            # However is not working now, when we submit the transaction to blockstream we get error:
+            # Trick 2: using the complementary s for signature
+            # However this trick is not working now, when we submit the transaction to blockstream we get error:
             # {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical signature: S value is unnecessarily high)
             rb = dern(sig.r)
-            new_s = BITCOIN.gen.n -sig.s
+            new_s = BITCOIN.gen.n - sig.s
             sb = dern(new_s)
             content = b''.join([bytes([0x02, len(rb)]), rb, bytes([0x02, len(sb)]), sb])
             new_sig = b''.join([bytes([0x30, len(content)]), content]) + b'\x01' # DER signature + SIGHASH_ALL
