@@ -148,6 +148,9 @@ class MalleabilityTest:
             tx_ins[i].script_sig = script_sig
         return tx
 
+    def not_strictly_verify_transction(self, tx:Tx):
+        return tx.validate()
+
     def modify_transation(self, tx_data: bytes, trick):
         tx = Tx.decode(BytesIO(tx_data))
         tx_in = tx.tx_ins[0]
@@ -165,7 +168,7 @@ class MalleabilityTest:
             nb = (b'\x00' if nb[0] >= 0x80 else b'') + nb # preprend 0x00 if first byte >= 0x80
             return nb
 
-        if trick == "der-padding":
+        if trick == "zero-padding-in-der":
             # Trick 1: padding 0x00 byte to the part of the DER signature bytes
             # However this trick is not working now, when we submit the transaction to blockstream we get error:
             # {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical DER signature)"}
@@ -237,43 +240,54 @@ def main():
 
     print("-" * 80)
     tx = test.make_transaction()
+    send_btc_amount = tx.tx_outs[0].amount / 100000000.0
     assert tx.validate()
     print("Original transaction info:")
     print_tranction_info(tx)
-
-
     print("-" * 80)
+    print(f"Sending {send_btc_amount} btc from wallet {sender_wallet.get_address()} to wallet {receiver_wallet.get_address()}")
+
+
+    tx_bytes = tx.encode()
     # Suppose the tx bytes data is send to a malicious node.
     # Remember we can't steal money or make any semantic changes to the transaction.
     # The node will modify the part of the signature of transation and the new transction
     # is valid but the transaction id is changed
-    mod_tx1 = test.modify_transation(tx.encode(), trick="der-padding")
-    assert mod_tx1.validate()
+    mod_tx1 = test.modify_transation(tx_bytes, trick="zero-padding-in-der")
+    assert test.not_strictly_verify_transction(mod_tx1) == True
     assert mod_tx1.id() != tx.id()
     print("Modify transaction1 info:")
     print_tranction_info(mod_tx1)
 
     print("-" * 80)
     print(f"Original transaction id: {tx.id()}")
-    print(f"  Modify transaction1 id: {mod_tx1.id()}")
+    print(f"  Modified transaction id: {mod_tx1.id()}")
+    print(f"  Transaction ids equal: {mod_tx1.id() != tx.id()}")
+    print(f"  Modified transaction vevild(not stritly verfify): {test.not_strictly_verify_transction(mod_tx1)}")
     print("-" * 80)
 
     # The malicious node will broadcast the modified transation to the network. Because is valid,
     # it will be confirmed and be part of one of the block in the blockchain.
     # The flaw related to DER-encoded ASN.1 data was fixed by the BIP66 soft fork.
     # Here we will get error: {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical DER signature)"}
-
     try:
         test.broadcast_transation(mod_tx1)
     except Exception as e:
         print(e)
 
 
-    mod_tx2 = test.modify_transation(tx.encode(), trick="ecdsa-siging")
-    assert mod_tx2.validate()
+    mod_tx2 = test.modify_transation(tx_bytes, trick="high-s-in-ecdsa")
+    assert test.not_strictly_verify_transction(mod_tx2) == True
     assert mod_tx2.id() != tx.id()
-    print("Modify transaction2 info:")
+    print("Modify transaction1 info:")
     print_tranction_info(mod_tx2)
+
+    print("-" * 80)
+    print(f"Original transaction id: {tx.id()}")
+    print(f"  Modified transaction id: {mod_tx2.id()}")
+    print(f"  Transaction ids equal: {mod_tx2.id() != tx.id()}")
+    print(f"  Modified transaction vevild(not stritly verfify): {test.not_strictly_verify_transction(mod_tx2)}")
+    print("-" * 80)
 
     # Bitcoin Core added a mechanism to enforce low S-values with PR #6769, which was merged in Bitcoin Core in October 2015. 
     # Here we will get error: {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical DER signature)"}
