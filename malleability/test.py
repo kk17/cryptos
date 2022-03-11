@@ -285,7 +285,7 @@ def main():
     print("-" * 80)
     print(f"Original transaction id: {tx.id()}")
     print(f"  Modified transaction id: {mod_tx2.id()}")
-    print(f"  Transaction ids equal: {mod_tx2.id() != tx.id()}")
+    print(f"  Transaction ids different: {mod_tx2.id() != tx.id()}")
     print(f"  Modified transaction vevild(not stritly verfify): {test.not_strictly_verify_transction(mod_tx2)}")
     print("-" * 80)
 
