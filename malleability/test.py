@@ -290,7 +290,8 @@ def main():
     print("-" * 80)
 
     # Bitcoin Core added a mechanism to enforce low S-values with PR #6769, which was merged in Bitcoin Core in October 2015. 
-    # Here we will get error: {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical DER signature)"}
+    # Here we will get error: {"code":-26,"message":"non-mandatory-script-verify-flag (Non-canonical signature: 
+    # S value is unnecessarily high)"}
     try:
         test.broadcast_transation(mod_tx2)
     except Exception as e:
